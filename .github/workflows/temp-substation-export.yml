@@ -1,16 +1,10 @@
-name: TEMP TPG Substation EDM Build
+name: TPG Substation Temporary Export
 
 on:
   push:
-    branches: [temp-substation-export-20260903]
-    paths:
-      - '.github/workflows/temp-substation-export.yml'
-      - 'edm-jobs/**'
-      - 'tools/tpg_substation_public_export.py'
+    branches:
+      - temp-substation-export-20260903
   workflow_dispatch:
-
-permissions:
-  contents: read
 
 jobs:
   export:
@@ -19,49 +13,40 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [intact, destroyed, lod1, lod2]
-    env:
-      BLENDER_URL: https://download.blender.org/release/Blender4.1/blender-4.1.1-windows-x64.zip
-      ED_EXPORTER_COMMIT: 5f03ba70ec96ca6ce68028eabc786ecd97f9cf93
+        variant:
+          - intact
+          - destroyed
+          - lod1
+          - lod2
     steps:
       - uses: actions/checkout@v4
-      - name: Install Blender 4.1.1
+      - name: Download Blender
         shell: pwsh
         run: |
-          $ErrorActionPreference='Stop'
-          $zip=Join-Path $env:RUNNER_TEMP 'blender.zip'; $dir=Join-Path $env:RUNNER_TEMP 'blender'
-          Invoke-WebRequest -Uri $env:BLENDER_URL -OutFile $zip
-          Expand-Archive $zip $dir -Force
-          $exe=Get-ChildItem $dir -Filter blender.exe -Recurse | Select-Object -First 1
-          if(-not $exe){throw 'Blender missing'}
-          "BLENDER_EXE=$($exe.FullName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-      - name: Install official ED exporter
+          Invoke-WebRequest -Uri https://download.blender.org/release/Blender4.1/blender-4.1.1-windows-x64.zip -OutFile "$env:RUNNER_TEMP\blender.zip"
+          Expand-Archive "$env:RUNNER_TEMP\blender.zip" "$env:RUNNER_TEMP\blender" -Force
+          $exe = Get-ChildItem "$env:RUNNER_TEMP\blender" -Filter blender.exe -Recurse | Select-Object -First 1
+          "BLENDER_EXE=$($exe.FullName)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Install EDM exporter
         shell: pwsh
         run: |
-          $ErrorActionPreference='Stop'
-          $src=Join-Path $env:RUNNER_TEMP 'Blender-EDM-Exporter'
-          git clone --filter=blob:none https://github.com/EagleDynamics/Blender-EDM-Exporter.git $src
-          git -C $src checkout $env:ED_EXPORTER_COMMIT
-          $scripts=Join-Path $env:GITHUB_WORKSPACE '.edm-blender-scripts'; $addons=Join-Path $scripts 'addons'
-          New-Item -ItemType Directory -Force -Path $addons | Out-Null
-          Copy-Item -Recurse -Force (Join-Path $src 'io_scene_edm') (Join-Path $addons 'io_scene_edm')
-          $upper=Join-Path $addons 'io_scene_edm\Materials'; $temp=Join-Path $addons 'io_scene_edm\__materials_casefix'; $lower=Join-Path $addons 'io_scene_edm\materials'
-          if(Test-Path $upper){Rename-Item $upper '__materials_casefix'; Rename-Item $temp 'materials'}
-          if(-not (Test-Path (Join-Path $lower '__init__.py'))){throw 'Material casing normalization failed'}
-          if(-not (Test-Path (Join-Path $addons 'io_scene_edm\pyedm_311.pyd'))){throw 'pyedm_311.pyd missing'}
-          "BLENDER_USER_SCRIPTS=$scripts" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-      - name: Export ${{ matrix.variant }}
+          git clone --filter=blob:none https://github.com/EagleDynamics/Blender-EDM-Exporter.git "$env:RUNNER_TEMP\edm"
+          git -C "$env:RUNNER_TEMP\edm" checkout 5f03ba70ec96ca6ce68028eabc786ecd97f9cf93
+          New-Item -ItemType Directory -Force -Path ".edm-blender-scripts\addons" | Out-Null
+          Copy-Item -Recurse -Force "$env:RUNNER_TEMP\edm\io_scene_edm" ".edm-blender-scripts\addons\io_scene_edm"
+          Rename-Item ".edm-blender-scripts\addons\io_scene_edm\Materials" "__materials_casefix"
+          Rename-Item ".edm-blender-scripts\addons\io_scene_edm\__materials_casefix" "materials"
+          "BLENDER_USER_SCRIPTS=$env:GITHUB_WORKSPACE\.edm-blender-scripts" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Run export
         shell: pwsh
         run: |
-          $out=Join-Path $env:GITHUB_WORKSPACE 'edm-artifacts'
-          New-Item -ItemType Directory -Force -Path $out | Out-Null
-          & $env:BLENDER_EXE --background --python 'tools/tpg_substation_public_export.py' -- --variant '${{ matrix.variant }}' --artifact-dir $out
-          if($LASTEXITCODE -ne 0){throw 'EDM export failed'}
+          New-Item -ItemType Directory -Force -Path edm-artifacts | Out-Null
+          & $env:BLENDER_EXE --background --python tools/tpg_substation_public_export.py -- --variant ${{ matrix.variant }} --artifact-dir edm-artifacts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
           name: substation-${{ matrix.variant }}
           path: edm-artifacts/**
-          if-no-files-found: error
           retention-days: 7
 
   package:
@@ -74,53 +59,11 @@ jobs:
           pattern: substation-*
           path: merged
           merge-multiple: true
-      - name: Build DCS drop-in package
+      - name: Package
         shell: pwsh
-        run: |
-          $ErrorActionPreference='Stop'
-          $root=Join-Path $env:GITHUB_WORKSPACE 'package\TPG_Electrical_Substation_V1'
-          New-Item -ItemType Directory -Force -Path "$root\Shapes","$root\Textures","$root\Database" | Out-Null
-          $names=@('TPG_Electrical_Substation_V1.edm','TPG_Electrical_Substation_V1_Destroyed.edm','TPG_Electrical_Substation_V1_LOD1.edm','TPG_Electrical_Substation_V1_LOD2.edm')
-          foreach($n in $names){$p=Get-ChildItem merged -Filter $n -Recurse | Select-Object -First 1; if(-not $p){throw "Missing $n"}; Copy-Item $p.FullName "$root\Shapes\$n"}
-          Get-ChildItem merged -Path * -Recurse -File | Where-Object {$_.DirectoryName -match 'Textures'} | ForEach-Object {Copy-Item $_.FullName "$root\Textures\$($_.Name)" -Force}
-          @'
-model={
-  lods={
-    {"TPG_Electrical_Substation_V1.edm",1500.0};
-    {"TPG_Electrical_Substation_V1_LOD1.edm",4500.0};
-    {"TPG_Electrical_Substation_V1_LOD2.edm",22000.0};
-  };
-  collision_shell="TPG_Electrical_Substation_V1.edm";
-}
-'@ | Set-Content "$root\Shapes\TPG_Electrical_Substation_V1.lods" -Encoding ascii
-          @'
-declare_plugin("TPG Electrical Substation V1.0",{installed=true,dirName=current_mod_path,displayName=_("TPG Electrical Substation V1.0"),version="1.0.0",state="installed",info=_("High-detail electrical substation static structure")})
-mount_vfs_model_path(current_mod_path.."/Shapes")
-mount_vfs_texture_path(current_mod_path.."/Textures")
-dofile(current_mod_path.."/Database/db_tpg_electrical_substation.lua")
-plugin_done()
-'@ | Set-Content "$root\entry.lua" -Encoding utf8
-          @'
-local function add_structure(f)
-  f.shape_table_data={{file=f.ShapeName,life=f.Life,username=f.Name,desrt=f.ShapeNameDestr or "self",classname="lLandVehicle",positioning="BYNORMAL"}}
-  if f.ShapeNameDestr then f.shape_table_data[#f.shape_table_data+1]={name=f.ShapeNameDestr,file=f.ShapeNameDestr} end
-  f.mapclasskey="P0091000076"
-  f.attribute={wsType_Static,wsType_Standing,"Structures"}
-  add_surface_unit(f)
-end
-add_structure({Name="TPG_Electrical_Substation_V1",DisplayName=_("TPG Electrical Substation V1.0"),ShapeName="TPG_Electrical_Substation_V1",ShapeNameDestr="TPG_Electrical_Substation_V1_Destroyed",Life=1200,Rate=100,category="Structures",SeaObject=false,isPutToWater=false,numParking=0})
-'@ | Set-Content "$root\Database\db_tpg_electrical_substation.lua" -Encoding utf8
-          @'
-TPG Electrical Substation V1.0
-Install the TPG_Electrical_Substation_V1 folder directly into Saved Games\DCS\Mods\tech\
-Final refinement: true terrain-contact berm foundation; reference-driven porcelain station/bushing insulators; flat sign/placard graphics; intact/destroyed/LOD exports.
-'@ | Set-Content "$root\README.txt" -Encoding utf8
-          $zip=Join-Path $env:GITHUB_WORKSPACE 'TPG_Electrical_Substation_V1.0_DCS_DropIn.zip'
-          Compress-Archive -Path $root -DestinationPath $zip -Force
-          if(-not (Test-Path $zip)){throw 'Package missing'}
+        run: python tools/package_tpg_substation_public.py
       - uses: actions/upload-artifact@v4
         with:
           name: TPG-Electrical-Substation-V1.0-FINAL
           path: TPG_Electrical_Substation_V1.0_DCS_DropIn.zip
-          if-no-files-found: error
           retention-days: 7
